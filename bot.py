@@ -10,37 +10,91 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Storage for warns and invites
+# Storage for warns, invites, and welcome channel
 warns = defaultdict(int)
 invite_counts = defaultdict(int)
+welcome_channels = {}
+invite_cache = {}
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f'{bot.user} has connected to Discord!')
+    
+    # Cache invites on startup
+    for guild in bot.guilds:
+        try:
+            invite_cache[guild.id] = {invite.code: invite.uses for invite in await guild.invites()}
+        except:
+            pass
 
 @bot.event
 async def on_member_join(member):
-    """Track invites when a member joins"""
+    """Welcome new members and track invites"""
+    guild = member.guild
+    
     try:
-        invites_before = invite_counts.copy()
-        invites_after = {}
-        for invite in await member.guild.invites():
-            invites_after[invite.code] = invite.uses
+        # Track invites
+        invites_before = invite_cache.get(guild.id, {})
+        invites_after = {invite.code: invite.uses for invite in await guild.invites()}
+        invite_cache[guild.id] = invites_after
         
+        inviter = None
         for code, uses in invites_after.items():
-            if code not in invites_before or invites_after[code] > invites_before.get(code, 0):
-                inviter = (await member.guild.fetch_invite(code)).inviter
-                if inviter:
-                    invite_counts[inviter.id] += 1
+            if code not in invites_before or uses > invites_before.get(code, 0):
+                try:
+                    invite = await guild.fetch_invite(code)
+                    inviter = invite.inviter
+                    if inviter:
+                        invite_counts[inviter.id] += 1
+                except:
+                    pass
+                break
+    except:
+        pass
+    
+    # Send welcome message
+    try:
+        welcome_channel_id = welcome_channels.get(guild.id)
+        if welcome_channel_id:
+            channel = guild.get_channel(welcome_channel_id)
+        else:
+            # Find first text channel if no welcome channel set
+            channel = next((ch for ch in guild.text_channels if ch.permissions_for(guild.me).send_messages), None)
         
-        invite_counts.update(invites_after)
+        if channel:
+            embed = discord.Embed(
+                title="🎉 Welcome!",
+                description=f"Welcome to **{guild.name}**, {member.mention}!",
+                color=discord.Color.green()
+            )
+            embed.set_thumbnail(url=member.avatar.url if member.avatar else None)
+            embed.add_field(name="Member #", value=str(guild.member_count), inline=True)
+            
+            if inviter:
+                embed.add_field(name="Invited by", value=f"{inviter.mention} ({invite_counts[inviter.id]} invites)", inline=True)
+            
+            embed.set_footer(text=f"Account created: {member.created_at.strftime('%Y-%m-%d')}")
+            
+            await channel.send(embed=embed)
     except:
         pass
 
 @bot.tree.command(name='ping')
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message('Pong!')
+
+@bot.tree.command(name='setwelcome')
+@app_commands.describe(channel="Channel for welcome messages")
+async def setwelcome(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("❌ You don't have permission to set the welcome channel!", ephemeral=True)
+        return
+    
+    welcome_channels[interaction.guild.id] = channel.id
+    embed = discord.Embed(title="✅ Welcome Channel Set", color=discord.Color.green())
+    embed.add_field(name="Channel", value=channel.mention, inline=False)
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='warn')
 @app_commands.describe(user="User to warn", reason="Reason for warning")
